@@ -8,10 +8,42 @@ import urllib.parse
 import requests
 import shutil
 from html import unescape
+from bs4 import BeautifulSoup
 
 def fatal(msg):
 	print(msg, file=sys.stderr)
 	sys.exit(1)
+
+class URLUtilities:
+	INDEX = 'https://pursuit.purescript.org/'
+	STATIC = 'https://pursuit.purescript.org/static/'
+
+	@staticmethod
+	def package(package):
+		return 'https://pursuit.purescript.org/packages/{}'.format(urllib.parse.quote(package, ''))
+
+	@staticmethod
+	def module(package, version, module):
+		if package == 'builtins':
+			return 'https://pursuit.purescript.org/builtins/docs/{}'.format(urllib.parse.quote(module, ''))
+		else:
+			return 'https://pursuit.purescript.org/packages/{}/{}/docs/{}'\
+				.format(urllib.parse.quote(package, ''), urllib.parse.quote(version, ''), urllib.parse.quote(module, ''))
+
+class HTMLUtilities:
+	@staticmethod
+	def find_packages(html):
+		return re.findall(r'<a href="https://pursuit\.purescript\.org/packages/([^"/]*)">', html)
+
+	@staticmethod
+	def find_modules(html):
+		return re.findall(
+			r'<dd class="grouped-list__item"><a href="https://pursuit\.purescript\.org/packages/(?:[^/]+)/(?:[^/]+)/docs/([^"/]+)">',
+			html)
+
+	@staticmethod
+	def find_modules_builtins(html):
+		return re.findall(r'<dd class="grouped-list__item"><a href="https://pursuit\.purescript\.org/builtins/docs/(.*?)">', html)
 
 class Generator:
 	OUTPUT = 'purescript.docset'
@@ -20,7 +52,7 @@ class Generator:
 		self.assets = set([
 			'https://pursuit.purescript.org/static/res/favicon/favicon-16x16.png',
 			'https://pursuit.purescript.org/static/res/favicon/favicon-32x32.png'])
-		self.package_name = None
+		self.package = None
 		self.version = None
 
 	def generate(self):
@@ -37,17 +69,17 @@ class Generator:
 		print('Done')
 
 	def fetch_index(self):
-		self.package_name = None
+		self.package = None
 		self.version = None
 		print('Fetching package list')
-		r = requests.get('https://pursuit.purescript.org/')
-		html = r.text
-		packages = re.findall(r'<a href="https://pursuit\.purescript\.org/packages/([^"/]*)">', html)
+		r = requests.get(URLUtilities.INDEX)
+		html = re.sub(r'(</a></li>)</li>', r'\1', r.text) # fix html error
 		self.save_html(html, self.documents_path('index.html'))
+		packages = HTMLUtilities.find_packages(html)
 		return packages
 
-	def fetch_package(self, package_name):
-		self.package_name = package_name
+	def fetch_package(self, package):
+		self.package = package
 		modules = self.fetch_package_index()
 		for module in modules:
 			self.fetch_module(module)
@@ -63,108 +95,128 @@ class Generator:
 		os.makedirs(Generator.documents_path())
 
 	def fetch_package_index(self):
-		print('Fetching package {}'.format(self.package_name))
-		url = 'https://pursuit.purescript.org/packages/{}'.format(urllib.parse.quote(self.package_name))
-		r = requests.get(url)
+		print('Fetching package {}'.format(self.package))
+		r = requests.get(URLUtilities.package(self.package))
 		if r.status_code != 200:
-			fatal('Package "{}" not found'.format(self.package_name))
+			fatal('Package "{}" not found'.format(self.package))
 		self.version = r.url.split('/')[-1]
-		modules = re.findall(
-			r'<dd class="grouped-list__item"><a href="https://pursuit\.purescript\.org/packages/{}/{}/docs/([^"]+)">'
-				.format(re.escape(self.package_name), re.escape(self.version)),
-			r.text)
-		print('Fetching package {}@{} with {} modules'.format(self.package_name, self.version, len(modules)))
-		os.makedirs(self.documents_path(self.package_name, 'docs'))
-		self.save_html(r.text, self.documents_path(self.package_name, 'docs', 'index.html'))
+		modules = HTMLUtilities.find_modules(r.text)
+		print('Fetching package {}@{} with {} modules'.format(self.package, self.version, len(modules)))
+		os.makedirs(self.documents_path(self.package, 'docs'))
+		self.save_html(r.text, self.documents_path(self.package, 'docs', 'index.html'))
 		self.cursor.execute(
 			'INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?,?,?);',
-			[self.package_name, 'Package', os.path.join(self.package_name, 'docs', 'index.html')])
+			[self.package, 'Package', os.path.join(self.package, 'docs', 'index.html')])
 		return modules
 
 	def fetch_builtins(self):
 		print('Fetching builtins')
-		self.package_name = 'builtins'
+		self.package = 'builtins'
 		self.version = None
-		os.makedirs(self.documents_path(self.package_name, 'docs'))
+		os.makedirs(self.documents_path(self.package, 'docs'))
 		html = self.fetch_module('Prim')
-		modules = re.findall(r'<dd class="grouped-list__item"><a href="\.\./\.\./builtins/docs/(.*?)\.html">', html)
+		modules = HTMLUtilities.find_modules_builtins(html)
 		for module in modules:
 			if module != 'Prim':
 				self.fetch_module(module)
 
 	def fetch_module(self, module):
-		print('Fetching module {}{}/{}'.format(self.package_name, '@' + self.version if self.version else '', module))
-		if self.package_name == 'builtins':
-			url = 'https://pursuit.purescript.org/builtins/docs/{}'.format(urllib.parse.quote(module))
-		else:
-			url = 'https://pursuit.purescript.org/packages/{}/{}/docs/{}'\
-				.format(urllib.parse.quote(self.package_name), urllib.parse.quote(self.version), urllib.parse.quote(module))
-		r = requests.get(url)
+		print('Fetching module {}{}/{}'.format(self.package, '@' + self.version if self.version else '', module))
+		r = requests.get(URLUtilities.module(self.package, self.version, module))
 		if r.status_code != 200:
-			fatal('Module "{}/{}" not found'.format(self.package_name, module))
-		html = self.save_html(r.text, self.documents_path(self.package_name, 'docs', urllib.parse.quote(module) + '.html'))
+			fatal('Module "{}/{}" not found'.format(self.package, module))
+		html = self.save_html(r.text, self.documents_path(self.package, 'docs', urllib.parse.quote(module, '') + '.html'))
 		self.cursor.execute(
 			'INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?,?,?);',
-			[module, 'Module', os.path.join(self.package_name, 'docs', urllib.parse.quote(module) + '.html')])
+			[module, 'Module', os.path.join(self.package, 'docs', urllib.parse.quote(module, '') + '.html')])
 		self.db.commit()
-		return html
+		return r.text
 
 	@staticmethod
 	def documents_path(*paths):
 		return os.path.join(Generator.OUTPUT, 'Contents/Resources/Documents', *paths)
 
 	def save_html(self, html, path):
-		if self.package_name:
+		if self.package:
 			prefix = r'../../'
 		else:
 			prefix = r''
+		soup = BeautifulSoup(html, 'html.parser')
 		# remove google font
-		html = re.sub(r'<link href="https://fonts\.googleapis\.com/.*?>', '', html)
+		soup.find('link', href=re.compile(r'^https://fonts\.googleapis\.com/.*')).decompose()
 		# remove widget script
-		html = re.sub(r'<script src="https://pursuit.purescript.org/static/widget/.*?>', '', html)
+		soup.find('script', src=re.compile(r'^https://pursuit\.purescript\.org/static/widget/.*')).decompose()
 		# remove top banner
-		html = re.sub(r'<div class="top-banner clearfix">.*?(<main)', r'\1', html, flags=re.DOTALL)
+		soup.find('div', class_='top-banner').decompose()
 		# remove searches
-		html = re.sub(r'<a href="/search\?.*?">', '<a href="#">', html)
+		for el in soup.find_all('a', href=re.compile(r'^/search\?.*')):
+			el['href'] = '#'
 		# replace version selector with actual version
 		if self.version:
-			html = re.sub(
-				r'<select class="version-selector" id="hident2">.*?</select>\s*(<dl class="grouped-list">)',
-				r'\1<dt class="grouped-list__title">Version</dt><dd class="grouped-list__item">{}</dd>'.format(self.version),
-				html,
-				flags=re.DOTALL)
-		# collect asset
-		assets = re.findall(r'"(https://pursuit\.purescript\.org/static/[^?">]*)', html)
-		self.assets |= set(assets)
-		html = re.sub(r'https://pursuit\.purescript\.org/(static/[^"?]*)[^">]*', r'{}\1'.format(prefix), html)
-		# convert links
-		html = re.sub(
-			r'https://pursuit\.purescript\.org/(builtins)/docs/([^">#]*)',
-			r'{}\1/docs/\2.html'.format(prefix),
-			html)
-		html = re.sub(
-			r'https://pursuit\.purescript\.org/packages/([^/>"]*)(?:/[^/>"]*)?/?([>"])',
-			r'{}\1/docs/index.html\2'.format(prefix, self.package_name),
-			html)
-		html = re.sub(
-			r'https://pursuit\.purescript\.org/packages/([^/>"]*)/(?:[^/>"]*)/docs/([^>"#]*)',
-			r'{}\1/docs/\2.html'.format(prefix, self.package_name),
-			html)
+			select = soup.find('select', class_='version-selector')
+			if select:
+				dt = soup.new_tag('dt', text='Version', attrs={ 'class': 'grouped-list__title' })
+				dd = soup.new_tag('dd', text=self.version, attrs={ 'class': 'grouped-list__item' })
+				dl = select.find_next_sibling()
+				dl.insert(0, dt)
+				dl.insert(1, dd)
+				select.decompose()
 		# find anchors
-		html = re.sub(r'<div class="decl" id="(.*?)">', lambda m: self.process_anchor(path, m), html)
-		with open(path, 'w') as f:
-			f.write(html)
-		return html
+		tlds = soup.find_all('div', class_='decl')
+		for tld in tlds:
+			self.process_decl(path, tld, soup)
 
-	def process_anchor(self, path, match):
-		type_, name = match.group(1).split(':', maxsplit=1)
+		# enumerate elements
+		for el in soup():
+			for k, v in el.attrs.items():
+				# collect assets
+				if type(v) != str:
+					continue
+				urlprefix = URLUtilities.STATIC
+				if v.startswith(urlprefix):
+					v = v.split('?', 1)[0]
+					self.assets.add(v)
+					el.attrs[k] = prefix + 'static/' + v.split(urlprefix, 1)[1]
+					continue
+				# convert links
+				urlprefix = 'https://pursuit.purescript.org/builtins/docs/'
+				if v.startswith(urlprefix):
+					docpath, hashtag, anchor = v.split(urlprefix, 1)[1].partition('#')
+					el.attrs[k] = '{}builtins/docs/{}.html{}{}'.format(prefix, docpath, hashtag, anchor)
+					continue
+				if v.startswith('/packages/'):
+					v = 'https://pursuit.purescript.org' + v
+				urlprefix = 'https://pursuit.purescript.org/packages/'
+				if v.startswith(urlprefix):
+					docpath, hashtag, anchor = v.split(urlprefix, 1)[1].partition('#')
+					segs = docpath.strip('/').split('/')
+					if len(segs) == 4:
+						el.attrs[k] = '{}{}/docs/{}.html{}{}'.format(prefix, segs[0], segs[3], hashtag, anchor)
+					else:
+						el.attrs[k] = '{}{}/docs/index.html{}{}'.format(prefix, segs[0], hashtag, anchor)
+					continue
+		with open(path, 'w') as f:
+			f.write(str(soup))
+
+	def process_decl(self, path, decl, soup):
+		type_, name = decl.get('id').split(':', 1)
 		type_ = self.convert_type(type_)
 		name = unescape(name)
-		anchor_toc = '//apple_ref/cpp/{}/{}'.format(urllib.parse.quote(type_), urllib.parse.quote(name))
+		signature = decl.find('pre', class_='decl__signature')
+		if signature:
+			if signature.code.find() == signature.code.find('span', class_='keyword', text='class'):
+				type_ = 'Class'
+		anchor_toc = '//apple_ref/cpp/{}/{}'.format(urllib.parse.quote(type_, ''), urllib.parse.quote(name, ''))
 		self.cursor.execute(
 			'INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?,?,?);',
 			[name, type_, '{}#{}'.format(os.path.relpath(path, self.documents_path()), anchor_toc)])
-		return '{}<a name="{}" class="dashAnchor"></a>'.format(match.group(0), anchor_toc)
+		a = soup.new_tag('a', attrs={ 'name': anchor_toc, 'class': 'dashAnchor' })
+		decl.insert(0, a)
+		if type_ == 'Class':
+			members_lbl = decl.find('h4', text='Members')
+			if members_lbl:
+				for member in members_lbl.find_next_sibling().find_all('li', recursive=False):
+					self.process_decl(path, member, soup)
 
 	def download_assets(self):
 		print('Downloading assets')
@@ -189,7 +241,7 @@ class Generator:
 	def convert_type(t):
 		TABLE = {
 			't': 'Type',
-			'v': 'Value',
+			'v': 'Function',
 			'k': 'Kind',
 		}
 		return TABLE[t] if t in TABLE else t
