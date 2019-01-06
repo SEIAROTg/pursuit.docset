@@ -198,14 +198,17 @@ class Generator:
 		with open(path, 'w') as f:
 			f.write(str(soup))
 
-	def process_decl(self, path, decl, soup):
+	def process_decl(self, path, decl, soup, type_hint = None):
 		type_, name = decl.get('id').split(':', 1)
-		type_ = self.convert_type(type_)
 		name = unescape(name)
-		signature = decl.find('pre', class_='decl__signature')
-		if signature:
-			if signature.code.find() == signature.code.find('span', class_='keyword', text='class'):
-				type_ = 'Class'
+		if type_hint:
+			type_ = type_hint
+		else:
+			type_ = self.convert_type(type_)
+			signature = decl.find('pre', class_='decl__signature')
+			if signature:
+				if signature.code.find() == signature.code.find('span', class_='keyword', text='class'):
+					type_ = 'Class'
 		anchor_toc = '//apple_ref/cpp/{}/{}'.format(urllib.parse.quote(type_, ''), urllib.parse.quote(name, ''))
 		self.cursor.execute(
 			'INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?,?,?);',
@@ -216,7 +219,12 @@ class Generator:
 			members_lbl = decl.find('h4', text='Members')
 			if members_lbl:
 				for member in members_lbl.find_next_sibling().find_all('li', recursive=False):
-					self.process_decl(path, member, soup)
+					self.process_decl(path, member, soup, 'Function')
+		elif type_ == 'Type':
+			ctors_lbl = decl.find('h4', text='Constructors')
+			if ctors_lbl:
+				for ctor in ctors_lbl.find_next_sibling().find_all('li', recursive=False):
+					self.process_decl(path, ctor, soup, 'Constructor')
 
 	def download_assets(self):
 		print('Downloading assets')
