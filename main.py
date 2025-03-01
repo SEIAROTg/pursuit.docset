@@ -5,7 +5,9 @@ import sys
 import os
 import sqlite3
 import urllib.parse
+import urllib3.util
 import requests
+import requests.adapters
 import shutil
 from html import unescape
 from bs4 import BeautifulSoup
@@ -54,6 +56,11 @@ class Generator:
 			'https://pursuit.purescript.org/static/res/favicon/favicon-32x32.png'])
 		self.package = None
 		self.version = None
+		retry_strategy = urllib3.util.Retry(backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+		adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
+		self.session = requests.Session()
+		self.session.mount('http://', adapter)
+		self.session.mount('https://', adapter)
 
 	def generate(self):
 		self.create_docset();
@@ -72,7 +79,7 @@ class Generator:
 		self.package = None
 		self.version = None
 		print('Fetching package list')
-		r = requests.get(URLUtilities.INDEX)
+		r = self.session.get(URLUtilities.INDEX)
 		html = re.sub(r'(</a></li>)</li>', r'\1', r.text) # fix html error
 		self.save_html(html, self.documents_path('index.html'))
 		packages = HTMLUtilities.find_packages(html)
@@ -96,7 +103,7 @@ class Generator:
 
 	def fetch_package_index(self):
 		print('Fetching package {}'.format(self.package))
-		r = requests.get(URLUtilities.package(self.package))
+		r = self.session.get(URLUtilities.package(self.package))
 		if r.status_code != 200:
 			fatal('Package "{}" not found'.format(self.package))
 		self.version = r.url.split('/')[-1]
@@ -122,10 +129,10 @@ class Generator:
 
 	def fetch_module(self, module):
 		print('Fetching module {}{}/{}'.format(self.package, '@' + self.version if self.version else '', module))
-		r = requests.get(URLUtilities.module(self.package, self.version, module))
+		r = self.session.get(URLUtilities.module(self.package, self.version, module))
 		if r.status_code != 200:
 			fatal('Module "{}/{}" not found'.format(self.package, module))
-		html = self.save_html(r.text, self.documents_path(self.package, 'docs', urllib.parse.quote(module, '') + '.html'))
+		self.save_html(r.text, self.documents_path(self.package, 'docs', urllib.parse.quote(module, '') + '.html'))
 		self.cursor.execute(
 			'INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?,?,?);',
 			[module, 'Module', os.path.join(self.package, 'docs', urllib.parse.quote(module, '') + '.html')])
@@ -230,7 +237,7 @@ class Generator:
 		print('Downloading assets')
 		for url in self.assets:
 			path = re.match(r'https://pursuit\.purescript\.org/(.*)', url).group(1)
-			r = requests.get(url)
+			r = self.session.get(url)
 			path = self.documents_path(path)
 			os.makedirs(os.path.dirname(path), exist_ok=True)
 			with open(path, 'wb') as f:
