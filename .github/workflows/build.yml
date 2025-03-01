@@ -1,0 +1,33 @@
+name: build
+
+on:
+  workflow_dispatch:
+  schedule:
+  - cron: '9 16 28 * *'  # 16:09 on 28th every month
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: install deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3 python3-requests python3-bs4
+    - name: build
+      run: python3 main.py
+    - name: package
+      run: tar -cvzf purescript.docset.tar.gz purescript.docset
+    - name: tag
+      id: tag
+      run: |
+        TAG_NAME="$(date +'%Y%m%d')"
+        git tag -f "${TAG_NAME}"
+        git push -f origin tag "${TAG_NAME}"
+        echo "tag_name=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+    - name: release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.tag.outputs.tag_name }}
+        files: purescript.docset.tar.gz
